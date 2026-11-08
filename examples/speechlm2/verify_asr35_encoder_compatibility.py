@@ -181,31 +181,65 @@ def load_asr(asr_arg: str, save_nemo: str = None):
     return asr
 
 
+def att_context_modes(enc_cfg) -> list:
+    """Normalize att_context_size into a list of [left, right] streaming modes.
+
+    NeMo parses a list-of-lists as multiple streaming *modes* (sampled randomly
+    during training per att_context_probs; inference uses the FIRST entry
+    unless encoder.set_default_att_context_size() switches it) — NOT per-layer
+    contexts. A flat [left, right] is a single mode.
+    """
+    from omegaconf import OmegaConf
+
+    raw = enc_cfg.get("att_context_size", None)
+    if raw is None:
+        return []
+    raw = OmegaConf.to_container(raw, resolve=True)
+    if not raw:
+        return []
+    if isinstance(raw[0], int):
+        raw = [raw]
+    return [list(m) for m in raw]
+
+
 def hard_assertions(asr, force: bool = False) -> dict:
     """Hard requirements from the phase-1 plan. Fail-fast unless --force."""
     enc_cfg = asr.cfg.encoder
     d_model = enc_cfg.get("d_model", None)
-    att = list(enc_cfg.get("att_context_size", []) or [])
+    modes = att_context_modes(enc_cfg)
+    probs = enc_cfg.get("att_context_probs", None)
     print(f"[assert] encoder d_model     = {d_model}")
-    print(f"[assert] att_context_size    = {att}")
+    print(f"[assert] att_context_size    = {modes}  (streaming modes; inference default = first)")
+    if probs:
+        print(f"[assert] att_context_probs  = {probs}")
 
     failures = []
     if d_model != 1024:
         failures.append(f"d_model={d_model} != 1024 (modality_adapter / RNNT joint expect 1024)")
-    if not att or len(att) < 2 or att[1] != 0:
-        failures.append(f"att_context_size={att} is not causal (right context must be 0)")
-    if list(att) != [56, 0]:
-        print(f"[assert] WARNING: att_context_size {att} != [56, 0] (plan expects 80ms streaming [56,0])")
-
+    causal = [m for m in modes if len(m) == 2 and m[1] == 0]
+    if not causal:
+        failures.append(f"no causal streaming mode (right context 0) among {modes}")
+    chosen = None
+    if causal:
+        chosen = causal[0]
+        if modes and list(modes[0]) != chosen:
+            print(
+                f"[assert] NOTE: default mode {modes[0]} carries right context {modes[0][1]}; the runtime "
+                f"consumes the frontier encoder frame with no audio ahead of it, so G2 pins causal {chosen}"
+            )
+        if chosen[0] > 70:
+            failures.append(
+                f"causal left context {chosen[0]} > 70 frames (runtime encode window is 70 chunks = 5.6s)"
+            )
     if failures:
         for f in failures:
             eprint(f"[assert] FAIL: {f}")
         if not force:
             eprint("[assert] hard requirement violated — aborting (use --force to continue anyway)")
             sys.exit(2)
-    else:
-        print("[assert] OK: d_model=1024, causal att_context_size")
-    return {"d_model": d_model, "att_context_size": att}
+    if chosen:
+        print(f"[assert] OK: d_model=1024, causal streaming mode {chosen} available")
+    return {"d_model": d_model, "att_context_size": modes, "causal_mode": chosen}
 
 
 def transcribe_probe(asr, wav_path: str, device: str):
@@ -372,6 +406,16 @@ def encode_side(preprocessor, encoder, wav: torch.Tensor, device: str):
 def latent_comparison(asr, ckpt_dir: str, audio_dir: str, device: str) -> dict:
     old_pre, old_enc = build_old_perception(ckpt_dir, device)
     new_pre, new_enc = asr.preprocessor.eval().to(device), asr.encoder.eval().to(device)
+
+    # Run the NEW encoder in the causal mode G2 pins, not the default (first)
+    # mode — matches how the runtime actually consumes encoder frames.
+    causal = [m for m in att_context_modes(asr.cfg.encoder) if len(m) == 2 and m[1] == 0]
+    if causal and hasattr(new_enc, "set_default_att_context_size"):
+        try:
+            new_enc.set_default_att_context_size(causal[0])
+            print(f"[latent] new encoder pinned to causal streaming mode {causal[0]}")
+        except Exception as e:
+            print(f"[latent] WARNING: could not pin causal mode ({e}); latents use the encoder default")
 
     wavs = sorted(
         f for f in os.listdir(audio_dir) if f.lower().endswith((".wav", ".flac", ".ogg", ".mp3"))

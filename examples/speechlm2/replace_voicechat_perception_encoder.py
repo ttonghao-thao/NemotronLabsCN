@@ -168,6 +168,27 @@ def load_full_state_dict(ckpt_dir: str) -> dict:
     return sd
 
 
+def att_context_modes(enc_cfg) -> list:
+    """Normalize att_context_size into a list of [left, right] streaming modes.
+
+    NeMo parses a list-of-lists as multiple streaming *modes* (sampled randomly
+    during training per att_context_probs; inference uses the FIRST entry) —
+    NOT per-layer contexts. A flat [left, right] is a single mode.
+    (Kept in sync with verify_asr35_encoder_compatibility.py.)
+    """
+    from omegaconf import OmegaConf
+
+    raw = enc_cfg.get("att_context_size", None)
+    if raw is None:
+        return []
+    raw = OmegaConf.to_container(raw, resolve=True)
+    if not raw:
+        return []
+    if isinstance(raw[0], int):
+        raw = [raw]
+    return [list(m) for m in raw]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--voicechat-checkpoint-dir", required=True, help="official VoiceChat checkpoint dir (config.json + model.safetensors)")
@@ -209,13 +230,14 @@ def main():
 
     enc_cfg = asr.cfg.encoder
     d_model = enc_cfg.get("d_model", None)
-    att = list(enc_cfg.get("att_context_size", []) or [])
-    print(f"      encoder d_model={d_model} att_context_size={att}")
+    modes = att_context_modes(enc_cfg)
+    print(f"      encoder d_model={d_model} att_context_size={modes}")
     failures = []
     if d_model != 1024:
         failures.append(f"d_model={d_model} != 1024")
-    if not att or len(att) < 2 or att[1] != 0:
-        failures.append(f"att_context_size={att} not causal")
+    causal = [m for m in modes if len(m) == 2 and m[1] == 0]
+    if not causal:
+        failures.append(f"no causal streaming mode among {modes}")
     if failures:
         for f in failures:
             eprint(f"      FAIL: {f}")
@@ -265,6 +287,22 @@ def main():
     del vc_sd
 
     # ------------------------------------------------------------------ config
+    # Pin the causal streaming mode into the encoder config we write out.
+    # The runtime re-encodes the whole audio buffer and consumes the frontier
+    # encoder frame (audio_idx = audio_chunk_idx, MODEL_STEPS_PER_CALL=2) —
+    # that frame has no audio ahead of it, so it always runs with right
+    # context 0 whatever the configured mode. ASR 3.5 trains all its modes
+    # ([[56,3],[56,0],[56,6],[56,13]] sampled per att_context_probs), so
+    # pinning [56,0] is in-distribution and matches runtime behavior exactly.
+    if causal:
+        from omegaconf import open_dict
+
+        with open_dict(asr.cfg.encoder):
+            asr.cfg.encoder.att_context_size = causal[0]
+            if "att_context_probs" in asr.cfg.encoder:
+                del asr.cfg.encoder.att_context_probs
+        print(f"      pinned perception.encoder.att_context_size = {causal[0]} (causal mode)")
+
     print("[3/5] patching config.json perception.encoder / perception.preprocessor")
     cfg_path = os.path.join(ckpt_dir, "config.json")
     with open(cfg_path, "r") as f:

@@ -85,8 +85,12 @@ docker run -it --rm --runtime=nvidia --gpus '"device=0"' --shm-size=8GB \
      --probe-wav audio/zh_1.wav"
 ```
 
-Pass: prints `d_model = 1024`, causal `att_context_size = [56, 0]`, and a
-readable Chinese transcript of the probe WAV.
+Pass: prints `d_model = 1024` and reports a causal streaming mode among the
+model's `att_context_size` modes. ASR 3.5 ships `[[56, 3], [56, 0], [56, 6],
+[56, 13]]` — four streaming *modes* (not per-layer contexts); G0 reports the
+causal `[56, 0]` mode and G2 pins it into the ZH checkpoint. A garbled or
+missing `--probe-wav` transcript is a known shim caveat (no language
+prompting); the authoritative check is G4.
 
 If your local copy is an HF snapshot dir, pass the directory instead
 (`--asr models/nemotron-3.5-asr-streaming-0.6b`) — for G1/G2 note the actual
@@ -221,6 +225,18 @@ checkpoint at G2. Any other missing/unexpected key still fails the restore.
 Consequence: the `--probe-wav` transcript runs the encoder *without* language
 prompting, so treat a wrong-language or garbled probe transcript as a known
 shim limitation, not a model defect — the authoritative check is G4.
+
+**`att_context_size [[56, 3], [56, 0], [56, 6], [56, 13]]` flagged as "not
+causal"** — a list-of-lists is NeMo's multi-**mode** streaming config, not
+per-layer contexts: modes are sampled during training (per
+`att_context_probs`) and inference uses the first entry unless switched.
+`[56, 0]` causal is one of the trained modes. The VoiceChat runtime
+re-encodes the whole audio buffer and consumes the frontier encoder frame
+immediately (`audio_idx = audio_chunk_idx`, `MODEL_STEPS_PER_CALL=2`) — that
+frame has no audio ahead of it, so it always runs with right context 0
+whatever the configured mode (the old EN encoder itself ran `[70, 1]` under
+the same regime). G2 therefore pins `[56, 0]`, which is in-distribution and
+matches runtime behavior exactly; G1's latent comparison pins the same mode.
 
 **Probe transcript skipped (`[probe] WARNING: transcribe failed`)** — the shim
 class supports cfg / encoder / preprocessor access, but full streaming

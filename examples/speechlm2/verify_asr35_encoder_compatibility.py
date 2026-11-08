@@ -46,6 +46,75 @@ def eprint(*args, **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# nemo shim — NIM image nemo (2.4.0rc0) predates ASR 3.5's model class
+# ---------------------------------------------------------------------------
+
+ASR35_MODEL_MODULE = "nemo.collections.asr.models.rnnt_bpe_models_prompt"
+ASR35_MODEL_CLASS = "EncDecRNNTBPEModelWithPrompt"
+
+
+def ensure_asr35_model_class():
+    """Make ASR 3.5 .nemo checkpoints restorable on nemo builds that lack
+    ``nemo.collections.asr.models.rnnt_bpe_models_prompt.EncDecRNNTBPEModelWithPrompt``
+    (e.g. the NIM image's nemo 2.4.0rc0): register a thin subclass of
+    EncDecRNNTBPEModel under that exact module path. G0/G1/G2 only touch
+    cfg / encoder.* / preprocessor.*, which the base class serves fine; extra
+    prompt/streaming keys in cfg are ignored. No-op on newer nemo that ships
+    the real class.
+    """
+    import importlib
+    import sys
+    import types
+
+    try:
+        importlib.import_module(ASR35_MODEL_MODULE)  # real class already present
+        return
+    except ModuleNotFoundError:
+        pass
+
+    import nemo.collections.asr.models as models_pkg
+    from nemo.collections.asr.models import EncDecRNNTBPEModel
+
+    class _WithPrompt(EncDecRNNTBPEModel):
+        """Stand-in for the ASR 3.5 prompt-RNNT model on older nemo builds."""
+
+    # Point the class's reported path at the name nemo looks up (and re-writes
+    # on save_to), not __main__ — keeps G0 --save-nemo output re-restorable.
+    _WithPrompt.__name__ = ASR35_MODEL_CLASS
+    _WithPrompt.__qualname__ = ASR35_MODEL_CLASS
+    _WithPrompt.__module__ = ASR35_MODEL_MODULE
+
+    shim = types.ModuleType(ASR35_MODEL_MODULE)
+    shim.EncDecRNNTBPEModelWithPrompt = _WithPrompt
+    sys.modules[ASR35_MODEL_MODULE] = shim
+    setattr(models_pkg, "rnnt_bpe_models_prompt", shim)
+    print(
+        f"[shim] nemo lacks {ASR35_MODEL_MODULE}; registered "
+        f"{ASR35_MODEL_CLASS} as an EncDecRNNTBPEModel subclass"
+    )
+
+
+def dump_nemo_targets(nemo_path: str):
+    """Diagnostic for a still-failing restore: list every _target_ inside the
+    .nemo config so the output names exactly which other classes need shimming."""
+    import tarfile
+
+    print(f"[diag] _target_ entries inside {nemo_path}:")
+    try:
+        with tarfile.open(nemo_path, "r:*") as tar:
+            for m in tar.getmembers():
+                if not m.name.endswith((".yaml", ".json")):
+                    continue
+                data = tar.extractfile(m).read().decode("utf-8", "replace")
+                for line in data.splitlines():
+                    s = line.strip()
+                    if "_target_" in s or s.startswith("target:"):
+                        print(f"[diag]   {m.name}: {s}")
+    except Exception as e:  # diagnostic must never mask the original error
+        print(f"[diag] could not read archive ({e})")
+
+
+# ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 
@@ -69,7 +138,12 @@ def load_asr(asr_arg: str, save_nemo: str = None):
         print(f"[load] using {src} found inside {asr_arg}")
     if src.endswith(".nemo") and os.path.isfile(src):
         print(f"[load] restoring ASR model from local {src} (offline)")
-        asr = ASRModel.restore_from(src, map_location="cpu")
+        ensure_asr35_model_class()
+        try:
+            asr = ASRModel.restore_from(src, map_location="cpu")
+        except Exception:
+            dump_nemo_targets(src)
+            raise
     else:
         print(f"[load] downloading ASR model {src} from HF (needs network; run with HF_HUB_OFFLINE=0)")
         asr = ASRModel.from_pretrained(src)

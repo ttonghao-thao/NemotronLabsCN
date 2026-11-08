@@ -199,6 +199,24 @@ expected to be garbage on Chinese — the old English RNNT consumes the new
 encoder's raw output. Turn-taking (barge-in/EOU) may misfire on Chinese; treat
 oddities there as phase-2 work (RNNT replacement), not encoder failure.
 
+## Troubleshooting
+
+**G0/G2 restore dies with `No module named
+'nemo.collections.asr.models.rnnt_bpe_models_prompt'` (followed by a confusing
+`Can't instantiate abstract class ASRModel ...`)** — the ASR 3.5 `.nemo` targets
+a model class newer than the NIM image's nemo (2.4.0rc0). Both scripts handle
+this automatically: before `restore_from` they register a drop-in subclass of
+`EncDecRNNTBPEModel` under that exact module path (a no-op on newer nemo that
+ships the real class). If restore *still* fails, the scripts print every
+`_target_` inside the `.nemo` (`[diag]` lines) — send that output back so the
+shim can be extended to the next missing class.
+
+**Probe transcript skipped (`[probe] WARNING: transcribe failed`)** — the shim
+class supports cfg / encoder / preprocessor access, but full streaming
+transcription may not work on the older nemo. G0's hard assertions
+(d_model=1024, causal att_context_size) and the G1 report are unaffected;
+transcription comes back at G4 with the full runtime.
+
 ## Rollback
 
 Serve the English stack again at any time by pointing the serving container at a

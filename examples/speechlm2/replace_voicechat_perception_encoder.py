@@ -50,6 +50,69 @@ PERCEPTION_PREFIX = "stt_model.perception."
 REPLACE_PREFIXES = ("encoder.", "preprocessor.")
 VC_REPLACE_PREFIXES = tuple(PERCEPTION_PREFIX + p for p in REPLACE_PREFIXES)
 
+ASR35_MODEL_MODULE = "nemo.collections.asr.models.rnnt_bpe_models_prompt"
+ASR35_MODEL_CLASS = "EncDecRNNTBPEModelWithPrompt"
+
+
+def ensure_asr35_model_class():
+    """Make ASR 3.5 .nemo checkpoints restorable on nemo builds that lack
+    ``nemo.collections.asr.models.rnnt_bpe_models_prompt.EncDecRNNTBPEModelWithPrompt``
+    (e.g. the NIM image's nemo 2.4.0rc0): register a thin subclass of
+    EncDecRNNTBPEModel under that exact module path. G2 only touches cfg /
+    encoder.* / preprocessor.*, which the base class serves fine; extra
+    prompt/streaming keys in cfg are ignored. No-op on newer nemo that ships
+    the real class. (Kept in sync with verify_asr35_encoder_compatibility.py —
+    both scripts are standalone by design.)
+    """
+    import importlib
+    import sys
+    import types
+
+    try:
+        importlib.import_module(ASR35_MODEL_MODULE)  # real class already present
+        return
+    except ModuleNotFoundError:
+        pass
+
+    import nemo.collections.asr.models as models_pkg
+    from nemo.collections.asr.models import EncDecRNNTBPEModel
+
+    class _WithPrompt(EncDecRNNTBPEModel):
+        """Stand-in for the ASR 3.5 prompt-RNNT model on older nemo builds."""
+
+    _WithPrompt.__name__ = ASR35_MODEL_CLASS
+    _WithPrompt.__qualname__ = ASR35_MODEL_CLASS
+    _WithPrompt.__module__ = ASR35_MODEL_MODULE
+
+    shim = types.ModuleType(ASR35_MODEL_MODULE)
+    shim.EncDecRNNTBPEModelWithPrompt = _WithPrompt
+    sys.modules[ASR35_MODEL_MODULE] = shim
+    setattr(models_pkg, "rnnt_bpe_models_prompt", shim)
+    print(
+        f"[shim] nemo lacks {ASR35_MODEL_MODULE}; registered "
+        f"{ASR35_MODEL_CLASS} as an EncDecRNNTBPEModel subclass"
+    )
+
+
+def dump_nemo_targets(nemo_path: str):
+    """Diagnostic for a still-failing restore: list every _target_ inside the
+    .nemo config so the output names exactly which other classes need shimming."""
+    import tarfile
+
+    print(f"[diag] _target_ entries inside {nemo_path}:")
+    try:
+        with tarfile.open(nemo_path, "r:*") as tar:
+            for m in tar.getmembers():
+                if not m.name.endswith((".yaml", ".json")):
+                    continue
+                data = tar.extractfile(m).read().decode("utf-8", "replace")
+                for line in data.splitlines():
+                    s = line.strip()
+                    if "_target_" in s or s.startswith("target:"):
+                        print(f"[diag]   {m.name}: {s}")
+    except Exception as e:  # diagnostic must never mask the original error
+        print(f"[diag] could not read archive ({e})")
+
 
 def cfg_to_dict(cfg) -> dict:
     from omegaconf import OmegaConf
@@ -110,7 +173,12 @@ def main():
     print(f"[1/5] restoring ASR 3.5 from {args.asr_nemo}")
     from nemo.collections.asr.models import ASRModel
 
-    asr = ASRModel.restore_from(args.asr_nemo, map_location="cpu").eval()
+    ensure_asr35_model_class()
+    try:
+        asr = ASRModel.restore_from(args.asr_nemo, map_location="cpu").eval()
+    except Exception:
+        dump_nemo_targets(args.asr_nemo)
+        raise
 
     enc_cfg = asr.cfg.encoder
     d_model = enc_cfg.get("d_model", None)

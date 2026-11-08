@@ -18,7 +18,12 @@ criterion (the old English RNNT stays in place).
 
 ```bash
 mkdir -p ~/voicechat-zh/{scripts,models,audio,zh-checkpoint,model-repo}
-chmod 777 ~/voicechat-zh/model-repo
+# The NIM container runs as a non-root user (uid 1000): grant read on
+# everything and write on the output dirs, otherwise every step dies with
+# `[Errno 13] Permission denied` on the mounted files (common when the
+# .nemo was downloaded/transferred as root or with 0600 perms).
+chmod -R a+rX ~/voicechat-zh
+chmod -R a+rwX ~/voicechat-zh/{zh-checkpoint,model-repo}
 ```
 
 ```

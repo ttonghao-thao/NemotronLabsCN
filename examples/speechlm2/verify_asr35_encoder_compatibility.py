@@ -327,8 +327,8 @@ def latent_comparison(asr, ckpt_dir: str, audio_dir: str, device: str) -> dict:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--asr", required=True, help="HF model name (nvidia/nemotron-3.5-asr-streaming-0.6b) or local .nemo path")
-    p.add_argument("--save-nemo", default=None, help="G0: save the downloaded model to this .nemo path")
+    p.add_argument("--asr", required=True, help="local .nemo path, local snapshot dir (auto-finds the .nemo), or HF model name (needs network)")
+    p.add_argument("--save-nemo", default=None, help="G0: optionally save the model to this .nemo path")
     p.add_argument("--probe-wav", default=None, help="G0: transcribe this WAV to sanity-check Chinese ASR")
     p.add_argument("--voicechat-checkpoint-dir", default=None, help="G1: official VoiceChat checkpoint dir (config.json + model.safetensors)")
     p.add_argument("--audio-dir", default=None, help="G1: dir with en_*.wav / zh_*.wav for latent comparison")

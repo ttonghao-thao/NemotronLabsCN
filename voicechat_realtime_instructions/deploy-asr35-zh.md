@@ -211,6 +211,17 @@ ships the real class). If restore *still* fails, the scripts print every
 `_target_` inside the `.nemo` (`[diag]` lines) — send that output back so the
 shim can be extended to the next missing class.
 
+**`Unexpected key(s) in state_dict: "prompt_kernel.*"`** — the real ASR 3.5
+class carries a language-prompt conditioning stack (fed by the
+`prompt_dictionary` / `num_prompts` config; `zh-CN` maps to id 4) that the
+shim's base class does not define. The shim tolerates and drops exactly those
+tensors on restore: G0–G2 and the VoiceChat runtime never consume
+`prompt_kernel` — only `encoder.*` / `preprocessor.*` cross into the ZH
+checkpoint at G2. Any other missing/unexpected key still fails the restore.
+Consequence: the `--probe-wav` transcript runs the encoder *without* language
+prompting, so treat a wrong-language or garbled probe transcript as a known
+shim limitation, not a model defect — the authoritative check is G4.
+
 **Probe transcript skipped (`[probe] WARNING: transcribe failed`)** — the shim
 class supports cfg / encoder / preprocessor access, but full streaming
 transcription may not work on the older nemo. G0's hard assertions

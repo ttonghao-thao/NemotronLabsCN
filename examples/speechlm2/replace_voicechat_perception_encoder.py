@@ -78,7 +78,34 @@ def ensure_asr35_model_class():
     from nemo.collections.asr.models import EncDecRNNTBPEModel
 
     class _WithPrompt(EncDecRNNTBPEModel):
-        """Stand-in for the ASR 3.5 prompt-RNNT model on older nemo builds."""
+        """Stand-in for the ASR 3.5 prompt-RNNT model on older nemo builds.
+
+        The real model carries a language-prompt conditioning stack
+        (prompt_kernel.*, fed by cfg's prompt_dictionary / num_prompts) that
+        EncDecRNNTBPEModel does not define. G2 only uses cfg and encoder.* /
+        preprocessor.* — and the VoiceChat runtime never consumes
+        prompt_kernel — so those tensors are tolerated as unexpected keys and
+        dropped instead of failing the strict restore. Anything else missing
+        or unexpected still raises. (Kept in sync with
+        verify_asr35_encoder_compatibility.py.)
+        """
+
+        def load_state_dict(self, state_dict, strict=True, assign=False):
+            result = super().load_state_dict(state_dict, strict=False, assign=assign)
+            missing = list(result.missing_keys)
+            tolerated = sorted(k for k in result.unexpected_keys if k.startswith("prompt_kernel."))
+            bad_unexpected = sorted(k for k in result.unexpected_keys if not k.startswith("prompt_kernel."))
+            if strict and (missing or bad_unexpected):
+                raise RuntimeError(
+                    f"Error(s) in loading state_dict for {type(self).__name__}:\n"
+                    f"\tMissing key(s): {missing}\n\tUnexpected key(s): {bad_unexpected}"
+                )
+            if tolerated:
+                print(
+                    f"[shim] dropped {len(tolerated)} prompt_kernel.* tensors "
+                    f"(language-prompt conditioning, unused by G0-G2): {tolerated}"
+                )
+            return result
 
     _WithPrompt.__name__ = ASR35_MODEL_CLASS
     _WithPrompt.__qualname__ = ASR35_MODEL_CLASS

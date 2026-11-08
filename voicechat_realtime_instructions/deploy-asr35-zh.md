@@ -25,7 +25,7 @@ chmod 777 ~/voicechat-zh/model-repo
 ~/voicechat-zh/
 ├── scripts/         # the two scripts from this repo
 ├── hf-checkpoint/   # official EN checkpoint (hf download)
-├── models/          # nemotron-3.5-asr-streaming-0.6b.nemo   (G0 output)
+├── models/          # pre-downloaded ASR 3.5 (bare .nemo or HF snapshot dir)
 ├── audio/           # en_*.wav / zh_*.wav 16kHz mono         (G1 input)
 ├── zh-checkpoint/   # ZH checkpoint                           (G2 output)
 └── model-repo/      # Triton model repository                 (G3 output)
@@ -45,6 +45,11 @@ pip install -U "huggingface_hub[cli]"
 hf download nvidia/NVIDIA-NemotronLabs-VoiceChat-11B --local-dir ~/voicechat-zh/hf-checkpoint
 ```
 
+ASR 3.5 (`nvidia/nemotron-3.5-asr-streaming-0.6b`) is assumed to be already
+downloaded into `models/` (e.g. `hf download nvidia/nemotron-3.5-asr-streaming-0.6b
+--local-dir ~/voicechat-zh/models/nemotron-3.5-asr-streaming-0.6b`, run wherever
+network is available). G0/G1/G2 run fully offline against this local copy.
+
 Prepare at least a few 16 kHz mono WAVs in `audio/`, named with language tags
 (e.g. `en_1.wav`, `en_2.wav`, `zh_1.wav`, `zh_2.wav`) — the language tag drives
 the per-language latent report.
@@ -58,22 +63,29 @@ All `docker run` commands below share this base (adjust GPU index as needed):
 nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest
 ```
 
-## G0 — download & sanity-check ASR 3.5 (inside container)
+## G0 — sanity-check the local ASR 3.5 (inside container, offline)
+
+ASR 3.5 is **already downloaded into `models/`** — G0/G1 never touch the
+network (keep the image default `HF_HUB_OFFLINE=1`). `--asr` accepts either
+the bare `.nemo` file or the snapshot directory containing it (the script
+finds the `.nemo` inside automatically):
 
 ```bash
 docker run -it --rm --runtime=nvidia --gpus '"device=0"' --shm-size=8GB \
   -v ~/voicechat-zh:/work -w /work \
-  -e HF_HUB_OFFLINE=0 \
   --entrypoint bash \
   nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest -c \
   "python scripts/verify_asr35_encoder_compatibility.py \
-     --asr nvidia/nemotron-3.5-asr-streaming-0.6b \
-     --save-nemo models/nemotron-3.5-asr-streaming-0.6b.nemo \
+     --asr models/nemotron-3.5-asr-streaming-0.6b.nemo \
      --probe-wav audio/zh_1.wav"
 ```
 
 Pass: prints `d_model = 1024`, causal `att_context_size = [56, 0]`, and a
-readable Chinese transcript of the probe WAV; `models/nemotron-3.5-...nemo` is saved.
+readable Chinese transcript of the probe WAV.
+
+If your local copy is an HF snapshot dir, pass the directory instead
+(`--asr models/nemotron-3.5-asr-streaming-0.6b`) — for G1/G2 note the actual
+`.nemo` path it resolves to and use that in `--asr-nemo`.
 
 ## G1 — compatibility pre-check (inside container)
 

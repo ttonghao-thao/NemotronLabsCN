@@ -11,10 +11,10 @@ torch / safetensors / omegaconf — it never imports code from the Speech repo.
 Modes
 -----
 G0 (model sanity):
-    --asr <hf-name-or-.nemo> [--save-nemo out.nemo] [--probe-wav zh.wav]
-    Downloads / restores the ASR 3.5 model, asserts d_model == 1024 and a
-    causal att_context_size, optionally transcribes a probe WAV, optionally
-    saves a local .nemo.
+    --asr <local .nemo | local snapshot dir | hf-name> [--probe-wav zh.wav]
+    Restores the ASR 3.5 model from the local copy (fully offline; an HF
+    org/name still works if network is available), asserts d_model == 1024
+    and a causal att_context_size, optionally transcribes a probe WAV.
 
 G1 (compatibility pre-check, requires --voicechat-checkpoint-dir):
     1. Key alignment: ASR ``encoder.*`` / ``preprocessor.*`` tensors vs the
@@ -53,12 +53,26 @@ def eprint(*args, **kwargs):
 def load_asr(asr_arg: str, save_nemo: str = None):
     from nemo.collections.asr.models import ASRModel
 
-    if asr_arg.endswith(".nemo") and os.path.isfile(asr_arg):
-        print(f"[load] restoring ASR model from {asr_arg}")
-        asr = ASRModel.restore_from(asr_arg, map_location="cpu")
+    src = asr_arg
+    if os.path.isdir(asr_arg):
+        # Local snapshot dir (e.g. `hf download --local-dir`): pick the .nemo inside it
+        nemos = sorted(
+            os.path.join(root, f)
+            for root, _dirs, files in os.walk(asr_arg)
+            for f in files
+            if f.endswith(".nemo")
+        )
+        if not nemos:
+            eprint(f"[load] FAIL: no .nemo found inside directory {asr_arg}")
+            sys.exit(2)
+        src = nemos[0]
+        print(f"[load] using {src} found inside {asr_arg}")
+    if src.endswith(".nemo") and os.path.isfile(src):
+        print(f"[load] restoring ASR model from local {src} (offline)")
+        asr = ASRModel.restore_from(src, map_location="cpu")
     else:
-        print(f"[load] downloading ASR model {asr_arg} (needs network; run with HF_HUB_OFFLINE=0)")
-        asr = ASRModel.from_pretrained(asr_arg)
+        print(f"[load] downloading ASR model {src} from HF (needs network; run with HF_HUB_OFFLINE=0)")
+        asr = ASRModel.from_pretrained(src)
 
     if save_nemo:
         os.makedirs(os.path.dirname(os.path.abspath(save_nemo)) or ".", exist_ok=True)

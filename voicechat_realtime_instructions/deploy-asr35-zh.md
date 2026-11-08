@@ -158,6 +158,40 @@ the container, so a successful conversion is itself the structural
 compatibility check. Failure here → compare encoder config keys and re-run G2
 with a field mapping.
 
+### G3 on an air-gapped host (offline tokenizer/config bundle)
+
+Everything in G3 is local except two `from_pretrained` calls against
+`nvidia/NVIDIA-Nemotron-Nano-9B-v2` (LLM config + tokenizer, in the deploy
+step and `convert_nemotronllm_checkpoint.py`). Pre-seed the HF hub cache on a
+networked machine and mount it:
+
+```bash
+# networked machine — a few MB (weights excluded); plain `hf download`
+# writes the proper hub cache layout (blobs/snapshots/refs)
+hf download nvidia/NVIDIA-Nemotron-Nano-9B-v2 --exclude "*.safetensors"
+tar -C ~/.cache/huggingface/hub -cf nano9b-hub-cache.tar \
+    models--nvidia--NVIDIA-Nemotron-Nano-9B-v2
+
+# server — extract and expose to the container (uid 1000)
+mkdir -p ~/voicechat-zh/hf-cache/hub
+tar -C ~/voicechat-zh/hf-cache/hub -xf nano9b-hub-cache.tar
+chmod -R a+rX ~/voicechat-zh/hf-cache
+```
+
+Add these flags to the G3 `docker run`:
+
+```bash
+  -v ~/voicechat-zh/hf-cache:/hf-cache \
+  -e HF_HOME=/hf-cache -e TRANSFORMERS_OFFLINE=1
+```
+
+`TRANSFORMERS_OFFLINE=1` survives the deploy script's `unset HF_HUB_OFFLINE`
+and makes transformers resolve from the cache with no network retries. G3 is
+idempotent — steps already written to the model repo are skipped on rerun.
+Serving (G4) needs none of this: the runtime rebinds the tokenizer to the
+bundled `model-repo/.../tokenizer/` at load time (`load_utils.py`), so the
+serving container stays fully offline.
+
 ## G4 — serve & test (official flow, no code mounts)
 
 ```bash

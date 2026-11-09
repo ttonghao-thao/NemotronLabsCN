@@ -161,98 +161,58 @@ with a field mapping.
 ### G3 on an air-gapped host (offline tokenizer/config bundle)
 
 Everything in G3 is local except two `from_pretrained` calls against
-`nvidia/NVIDIA-Nemotron-Nano-9B-v2` (LLM config + tokenizer, in the deploy
-step and `convert_nemotronllm_checkpoint.py`). Pre-seed the HF hub cache and
-mount it decoupled from `HF_HOME`.
+`nvidia/NVIDIA-Nemotron-Nano-9B-v2` (deploy tokenizer bundling in
+`checkpoint_utils/import_utils.py`, and `AutoConfig`/`AutoTokenizer` in
+`/s2s/scripts/convert_nemotronllm_checkpoint.py`).
 
-**1. Seed the cache** (networked machine — a few MB, weights excluded; plain
-`hf download` writes the proper hub cache layout; tar **only** the
-`models--*` dir, not the whole `~/.cache/huggingface`, which may bundle a
-0600 `token` file):
+**Recommended: patched files + a plain LLM files dir.** This repo carries
+patched copies of both files at their in-image paths
+(`s2s/scripts/convert_nemotronllm_checkpoint.py` and
+`opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py`).
+When `NEMO_LLM_LOCAL_DIR` points at a plain directory holding the LLM's
+`config.json` + tokenizer files (a modelscope or HF snapshot copy works
+as-is — no hub-cache layout involved), both steps load from it; when unset,
+behavior is identical to the image originals. No HF cache, no env juggling,
+no image changes.
 
-```bash
-hf download nvidia/NVIDIA-Nemotron-Nano-9B-v2 --exclude "*.safetensors"
-tar -C ~/.cache/huggingface/hub -cf nano9b-hub-cache.tar \
-    models--nvidia--NVIDIA-Nemotron-Nano-9B-v2
-```
-
-If only ModelScope is reachable (e.g. CN network), download the mirror and
-map its snapshot into the HF cache layout yourself — the cache dir must be
-named after the HF repo id (`nvidia/...`, from config's `pretrained_llm`),
-while the snapshot dir name is free as long as `refs/main` matches it:
+Stage the LLM files once (server):
 
 ```bash
-modelscope download nv-community/NVIDIA-Nemotron-Nano-9B-v2 --exclude "*.safetensors"
-# → /root/.cache/modelscope/models/nv-community--NVIDIA-Nemotron-Nano-9B-v2/snapshots/master
+mkdir -p ~/voicechat-zh/nano9b
 cp -a /root/.cache/modelscope/models/nv-community--NVIDIA-Nemotron-Nano-9B-v2/snapshots/master/. \
-      ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/snapshots/<name>/
-printf '<name>' > ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
-# sanity: vocab_size=131072, hidden_size=4480 in the mirror's config.json
-# must match the G3 log ("Saved embeddings (vocab_size=..., hidden_size=...)")
+      ~/voicechat-zh/nano9b/
+chmod -R a+rX ~/voicechat-zh/nano9b
+# sanity: must match the G3 log ("Saved embeddings (vocab_size=131072, hidden_size=4480)")
+grep -E '"(vocab_size|hidden_size)"' ~/voicechat-zh/nano9b/config.json
 ```
 
-A **hand-built** cache (e.g. from a `--local-dir` copy) works too, but must
-be a real hub cache layout — `refs/main` is mandatory (hub reads it to locate
-the snapshot; without it offline resolution fails even with every file
-present), must contain the snapshot dir name **without a trailing newline**
-(`printf`, not `echo`), and `blobs/` is not needed (real files in the
-snapshot are fine):
-
-```
-hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/
-├── refs/main                 # printf '<name>' > this file; wc -c == len(<name>)
-└── snapshots/<name>/         # config.json, tokenizer.json, tokenizer_config.json,
-                              # special_tokens_map.json
-```
-
-**2. Mount it decoupled from `HF_HOME`.** The auth-token path is derived as
-`$HF_HOME/token`, and `get_token()` runs even fully offline. Keep `HF_HOME`
-on container scratch so that file simply doesn't exist (`get_token()` returns
-None), and point `HF_HUB_CACHE` at the mounted dir that contains
-`models--*`. A `PermissionError` (not `FileNotFoundError`) at
-`$HF_HOME/token` means a stray unreadable token file or an unsearchable mount
-root — e.g. `PermissionError at /hf-cache/token` inside `from_pretrained`.
+Sync the patched files from the repo (same as the scripts/ sync) and add
+these flags to the G3 `docker run`:
 
 ```bash
-# server
-mkdir -p ~/voicechat-zh/hf-cache/hub
-tar -C ~/voicechat-zh/hf-cache/hub -xf nano9b-hub-cache.tar
-rm -f ~/voicechat-zh/hf-cache/token          # if a stray token file came along
-chmod -R a+rX ~/voicechat-zh/hf-cache         # AFTER extraction; container reads as uid 1000
+  -v ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:ro \
+  -v ~/voicechat-zh/s2s/scripts/convert_nemotronllm_checkpoint.py:/s2s/scripts/convert_nemotronllm_checkpoint.py:ro \
+  -v ~/voicechat-zh/nano9b:/nano9b:ro \
+  -e NEMO_LLM_LOCAL_DIR=/nano9b
 ```
 
-Add these flags to the G3 `docker run`:
+Watch for `NEMO_LLM_LOCAL_DIR set - …` log lines in both the deploy
+tokenizer step and the nano-v2-vllm conversion.
 
-```bash
-  -v ~/voicechat-zh/hf-cache/hub:/hf-hub \
-  -e HF_HUB_CACHE=/hf-hub \
-  -e HF_HOME=/tmp/hf-home \
-  -e TRANSFORMERS_OFFLINE=1
-```
-
-`TRANSFORMERS_OFFLINE=1` survives the deploy script's `unset HF_HUB_OFFLINE`
-and makes transformers resolve from the cache with no network retries.
-
-**3. Verify before rerunning G3.** Host side, as the container user (uid 1000):
-
-```bash
-sudo -u '#1000' cat ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
-sudo -u '#1000' head -c 200 ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/snapshots/*/config.json
-```
-
-Container side — dry-run the exact resolution G3 needs (no GPU required):
-
-```bash
-docker run -it --rm \
-  -v ~/voicechat-zh/hf-cache/hub:/hf-hub \
-  -e HF_HUB_CACHE=/hf-hub -e HF_HOME=/tmp/hf-home -e TRANSFORMERS_OFFLINE=1 \
-  --entrypoint bash \
-  nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest -c \
-  'python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained(\"nvidia/NVIDIA-Nemotron-Nano-9B-v2\"); print(\"TOKENIZER_OFFLINE_OK\")"'
-```
+**Alternative (no patched files): pre-seeded HF hub cache.** Seed a real hub
+cache on a networked machine (`hf download … --exclude "*.safetensors"`, tar
+only the `models--*` dir) or map a modelscope snapshot into the layout
+(cache dir named after the HF repo id; `refs/main` = snapshot dir name via
+`printf`, no trailing newline; real files in `snapshots/<name>/`). Mount it
+with `-v ~/voicechat-zh/hf-cache/hub:/hf-hub -e HF_HUB_CACHE=/hf-hub
+-e HF_HOME=/tmp/hf-home -e TRANSFORMERS_OFFLINE=1` — never point `HF_HOME`
+at the read-only mount (the token path is `$HF_HOME/token`; a
+`PermissionError` there means a stray unreadable token file or an
+unsearchable mount root). Verify as the container user with
+`sudo -u '#1000' cat …/refs/main`.
 
 If `AutoConfig(trust_remote_code=True)` later asks for remote code, copy the
-repo's `*.py` files into the snapshot dir and rerun. G3 is idempotent —
+repo's `*.py` files into the staged dir and rerun. G3 is idempotent —
 steps already written to the model repo are skipped on rerun. Serving (G4)
 needs none of this: the runtime rebinds the tokenizer to the bundled
 `model-repo/.../tokenizer/` at load time (`load_utils.py`), so the serving

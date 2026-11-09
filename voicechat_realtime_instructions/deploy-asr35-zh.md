@@ -192,6 +192,17 @@ Serving (G4) needs none of this: the runtime rebinds the tokenizer to the
 bundled `model-repo/.../tokenizer/` at load time (`load_utils.py`), so the
 serving container stays fully offline.
 
+Tar **only** the `models--nvidia--...` directory — not the whole
+`~/.cache/huggingface`, which may bundle a 0600 `token` file — and run the
+`chmod` **after** extraction. The container reads the cache as uid 1000; a
+stray unreadable `token` (or a 0700 top dir) fails with
+`PermissionError at /hf-cache/token` deep inside `from_pretrained`. Verify as
+the container user before rerunning G3:
+
+```bash
+sudo -u '#1000' cat ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
+```
+
 ## G4 — serve & test (official flow, no code mounts)
 
 ```bash

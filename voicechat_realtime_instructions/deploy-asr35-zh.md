@@ -162,61 +162,86 @@ with a field mapping.
 
 Everything in G3 is local except two `from_pretrained` calls against
 `nvidia/NVIDIA-Nemotron-Nano-9B-v2` (LLM config + tokenizer, in the deploy
-step and `convert_nemotronllm_checkpoint.py`). Pre-seed the HF hub cache on a
-networked machine and mount it:
+step and `convert_nemotronllm_checkpoint.py`). Pre-seed the HF hub cache and
+mount it decoupled from `HF_HOME`.
+
+**1. Seed the cache** (networked machine — a few MB, weights excluded; plain
+`hf download` writes the proper hub cache layout; tar **only** the
+`models--*` dir, not the whole `~/.cache/huggingface`, which may bundle a
+0600 `token` file):
 
 ```bash
-# networked machine — a few MB (weights excluded); plain `hf download`
-# writes the proper hub cache layout (blobs/snapshots/refs)
 hf download nvidia/NVIDIA-Nemotron-Nano-9B-v2 --exclude "*.safetensors"
 tar -C ~/.cache/huggingface/hub -cf nano9b-hub-cache.tar \
     models--nvidia--NVIDIA-Nemotron-Nano-9B-v2
+```
 
-# server — extract and expose to the container (uid 1000)
+A **hand-built** cache (e.g. from a `--local-dir` copy) works too, but must
+be a real hub cache layout — `refs/main` is mandatory (hub reads it to locate
+the snapshot; without it offline resolution fails even with every file
+present), must contain the snapshot dir name **without a trailing newline**
+(`printf`, not `echo`), and `blobs/` is not needed (real files in the
+snapshot are fine):
+
+```
+hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/
+├── refs/main                 # printf '<name>' > this file; wc -c == len(<name>)
+└── snapshots/<name>/         # config.json, tokenizer.json, tokenizer_config.json,
+                              # special_tokens_map.json
+```
+
+**2. Mount it decoupled from `HF_HOME`.** The auth-token path is derived as
+`$HF_HOME/token`, and `get_token()` runs even fully offline. Keep `HF_HOME`
+on container scratch so that file simply doesn't exist (`get_token()` returns
+None), and point `HF_HUB_CACHE` at the mounted dir that contains
+`models--*`. A `PermissionError` (not `FileNotFoundError`) at
+`$HF_HOME/token` means a stray unreadable token file or an unsearchable mount
+root — e.g. `PermissionError at /hf-cache/token` inside `from_pretrained`.
+
+```bash
+# server
 mkdir -p ~/voicechat-zh/hf-cache/hub
 tar -C ~/voicechat-zh/hf-cache/hub -xf nano9b-hub-cache.tar
-chmod -R a+rX ~/voicechat-zh/hf-cache
+rm -f ~/voicechat-zh/hf-cache/token          # if a stray token file came along
+chmod -R a+rX ~/voicechat-zh/hf-cache         # AFTER extraction; container reads as uid 1000
 ```
 
 Add these flags to the G3 `docker run`:
 
 ```bash
-  -v ~/voicechat-zh/hf-cache:/hf-cache \
-  -e HF_HOME=/hf-cache -e TRANSFORMERS_OFFLINE=1
+  -v ~/voicechat-zh/hf-cache/hub:/hf-hub \
+  -e HF_HUB_CACHE=/hf-hub \
+  -e HF_HOME=/tmp/hf-home \
+  -e TRANSFORMERS_OFFLINE=1
 ```
 
 `TRANSFORMERS_OFFLINE=1` survives the deploy script's `unset HF_HUB_OFFLINE`
-and makes transformers resolve from the cache with no network retries. G3 is
-idempotent — steps already written to the model repo are skipped on rerun.
-Serving (G4) needs none of this: the runtime rebinds the tokenizer to the
-bundled `model-repo/.../tokenizer/` at load time (`load_utils.py`), so the
-serving container stays fully offline.
+and makes transformers resolve from the cache with no network retries.
 
-Tar **only** the `models--nvidia--...` directory — not the whole
-`~/.cache/huggingface`, which may bundle a 0600 `token` file — and run the
-`chmod` **after** extraction. The container reads the cache as uid 1000; a
-stray unreadable `token` (or a 0700 top dir) fails with
-`PermissionError at /hf-cache/token` deep inside `from_pretrained`. Verify as
-the container user before rerunning G3:
+**3. Verify before rerunning G3.** Host side, as the container user (uid 1000):
 
 ```bash
 sudo -u '#1000' cat ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
+sudo -u '#1000' head -c 200 ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/snapshots/*/config.json
 ```
 
-Building the cache **by hand** (e.g. from a `--local-dir` download) works too,
-but the layout must be a real hub cache — `refs/main` is mandatory (hub reads
-it to locate the snapshot; without it offline resolution fails even with all
-files present); `blobs/` is not needed, real files in the snapshot are fine:
-
-```
-hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/
-├── refs/main                 # one-line file: the snapshot dir name
-└── snapshots/<name>/         # config.json, tokenizer*.json, special_tokens_map.json
-```
+Container side — dry-run the exact resolution G3 needs (no GPU required):
 
 ```bash
-printf '<name>' > .../models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
+docker run -it --rm \
+  -v ~/voicechat-zh/hf-cache/hub:/hf-hub \
+  -e HF_HUB_CACHE=/hf-hub -e HF_HOME=/tmp/hf-home -e TRANSFORMERS_OFFLINE=1 \
+  --entrypoint bash \
+  nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest -c \
+  'python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained(\"nvidia/NVIDIA-Nemotron-Nano-9B-v2\"); print(\"TOKENIZER_OFFLINE_OK\")"'
 ```
+
+If `AutoConfig(trust_remote_code=True)` later asks for remote code, copy the
+repo's `*.py` files into the snapshot dir and rerun. G3 is idempotent —
+steps already written to the model repo are skipped on rerun. Serving (G4)
+needs none of this: the runtime rebinds the tokenizer to the bundled
+`model-repo/.../tokenizer/` at load time (`load_utils.py`), so the serving
+container stays fully offline.
 
 ## G4 — serve & test (official flow, no code mounts)
 

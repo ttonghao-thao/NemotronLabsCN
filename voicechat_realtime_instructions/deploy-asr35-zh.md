@@ -203,6 +203,21 @@ the container user before rerunning G3:
 sudo -u '#1000' cat ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
 ```
 
+Building the cache **by hand** (e.g. from a `--local-dir` download) works too,
+but the layout must be a real hub cache — `refs/main` is mandatory (hub reads
+it to locate the snapshot; without it offline resolution fails even with all
+files present); `blobs/` is not needed, real files in the snapshot are fine:
+
+```
+hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/
+├── refs/main                 # one-line file: the snapshot dir name
+└── snapshots/<name>/         # config.json, tokenizer*.json, special_tokens_map.json
+```
+
+```bash
+printf '<name>' > .../models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
+```
+
 ## G4 — serve & test (official flow, no code mounts)
 
 ```bash

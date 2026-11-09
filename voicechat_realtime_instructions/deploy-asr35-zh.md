@@ -5,10 +5,12 @@ inside the official VoiceChat 11B checkpoint with `nvidia/nemotron-3.5-asr-strea
 keeping everything else (modality adapter, projection, old RNNT, Nano 9B, EAR-TTS,
 function head) unchanged.
 
-**Your official deployment flow is used unchanged** — the only difference is *which
-checkpoint directory* is mounted. All new code (two scripts) runs inside the NIM
-inference container via mounts, so the nemo package used for the check is exactly
-the one the runtime uses.
+**The official deployment flow is used unchanged** — the only difference is *which
+checkpoint directory* is mounted. All custom code (the G0–G2 scripts and three
+patched deploy files for offline G3) runs inside the NIM inference container via
+mounts; the image itself is never modified, so the nemo package used for every
+check is exactly the one the runtime uses. The whole flow G0→G4 runs fully
+offline (no HF access at any step).
 
 Scope & acceptance (phase 1): verify 中文语音 → Nano 9B → 正确理解并回答.
 Chinese RNNT transcription / turn-taking quality is **not** a phase-1 acceptance
@@ -17,7 +19,7 @@ criterion (the old English RNNT stays in place).
 ## Server directory layout
 
 ```bash
-mkdir -p ~/voicechat-zh/{scripts,models,audio,zh-checkpoint,model-repo}
+mkdir -p ~/voicechat-zh/{scripts,models,audio,zh-checkpoint,model-repo,nano9b}
 # The NIM container runs as a non-root user (uid 1000): grant read on
 # everything and write on the output dirs, otherwise every step dies with
 # `[Errno 13] Permission denied` on the mounted files (common when the
@@ -28,9 +30,12 @@ chmod -R a+rwX ~/voicechat-zh/{zh-checkpoint,model-repo}
 
 ```
 ~/voicechat-zh/
-├── scripts/         # the two scripts from this repo
+├── scripts/         # G0-G2 scripts from this repo
+├── s2s/             # patched deploy scripts (G3 mounts two of them over the image copies)
+├── opt/             # patched checkpoint_utils/import_utils.py (G3 mounts it)
+├── nano9b/          # LLM config + tokenizer files, plain snapshot copy (G3 input)
 ├── hf-checkpoint/   # official EN checkpoint (hf download)
-├── models/          # pre-downloaded ASR 3.5 (bare .nemo or HF snapshot dir)
+├── models/          # pre-downloaded ASR 3.5 (bare .nemo or snapshot dir)
 ├── audio/           # en_*.wav / zh_*.wav 16kHz mono         (G1 input)
 ├── zh-checkpoint/   # ZH checkpoint                           (G2 output)
 └── model-repo/      # Triton model repository                 (G3 output)
@@ -38,16 +43,38 @@ chmod -R a+rwX ~/voicechat-zh/{zh-checkpoint,model-repo}
 
 Disk: keep ≥ 80 GB free (EN checkpoint + ZH checkpoint + model-repo + vLLM dirs).
 
-Get the scripts and the EN checkpoint:
+Get the repo files and the EN checkpoint:
 
 ```bash
 git clone -b nemotron-labs-voicechat https://github.com/ttonghao-thao/NemotronLabsCN.git /tmp/repo
+# G0-G2 scripts
 cp /tmp/repo/examples/speechlm2/verify_asr35_encoder_compatibility.py \
    /tmp/repo/examples/speechlm2/replace_voicechat_perception_encoder.py \
    ~/voicechat-zh/scripts/
+# patched deploy files for offline G3 (mounted over the image copies, see G3)
+cp -a /tmp/repo/s2s ~/voicechat-zh/
+mkdir -p ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils
+cp /tmp/repo/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py \
+   ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/
+chmod -R a+rX ~/voicechat-zh/s2s ~/voicechat-zh/opt
 
 pip install -U "huggingface_hub[cli]"
 hf download nvidia/NVIDIA-NemotronLabs-VoiceChat-11B --local-dir ~/voicechat-zh/hf-checkpoint
+```
+
+Stage the LLM files for offline G3 — `nvidia/NVIDIA-Nemotron-Nano-9B-v2`'s
+`config.json` + tokenizer files only (a few MB, weights not needed). Any plain
+snapshot copy works as-is (HF or modelscope mirror); no HF hub cache layout
+is involved:
+
+```bash
+# from a machine that has the snapshot (e.g. modelscope):
+#   modelscope download nv-community/NVIDIA-Nemotron-Nano-9B-v2 --exclude "*.safetensors"
+cp -a /root/.cache/modelscope/models/nv-community--NVIDIA-Nemotron-Nano-9B-v2/snapshots/master/. \
+      ~/voicechat-zh/nano9b/
+chmod -R a+rX ~/voicechat-zh/nano9b
+# sanity: must match the G3 log line "Saved embeddings (vocab_size=131072, hidden_size=4480)"
+grep -E '"(vocab_size|hidden_size)"' ~/voicechat-zh/nano9b/config.json
 ```
 
 ASR 3.5 (`nvidia/nemotron-3.5-asr-streaming-0.6b`) is assumed to be already
@@ -59,7 +86,7 @@ Prepare at least a few 16 kHz mono WAVs in `audio/`, named with language tags
 (e.g. `en_1.wav`, `en_2.wav`, `zh_1.wav`, `zh_2.wav`) — the language tag drives
 the per-language latent report.
 
-All `docker run` commands below share this base (adjust GPU index as needed):
+All G0–G2 `docker run` commands share this base (adjust GPU index as needed):
 
 ```bash
 --runtime=nvidia --gpus '"device=0"' --shm-size=8GB \
@@ -135,92 +162,57 @@ Pass: report shows encoder+preprocessor tensors injected (shape mismatches = 0),
 `modality_adapter`/`proj` kept, `_rnnt_merge_info` preserved, output
 `att_context_size = [56, 0]`.
 
-## G3 — generate the Triton model repo (official flow, ZH checkpoint mounted)
+## G3 — generate the Triton model repo (offline, patched deploy files)
 
-Identical to [generate-model-repo.md](generate-model-repo.md), only the mounted
-checkpoint differs:
+Same official entrypoint as [generate-model-repo.md](generate-model-repo.md)
+(`/s2s/deploy_s2s_model.sh`), with the ZH checkpoint mounted. Three spots in
+the deploy path load the LLM's config/tokenizer from
+`nvidia/NVIDIA-Nemotron-Nano-9B-v2` over the network; this repo carries
+patched copies of exactly those three files that load from a local directory
+instead when `NEMO_LLM_LOCAL_DIR` is set (unset, they behave identically to
+the image originals):
+
+- `opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py`
+  — deploy tokenizer bundling
+- `s2s/scripts/convert_nemotronllm_checkpoint.py` — `AutoConfig` /
+  `AutoTokenizer` for the nano-v2-vllm conversion
+- `s2s/scripts/convert_eartts_checkpoint.py` — `DuplexEARTTS`'s
+  `AutoTokenizer` (`cfg.model.pretrained_lm_name`)
 
 ```bash
-docker run -it --rm \
-  --runtime=nvidia \
-  --gpus '"device=0"' \
-  --shm-size=8GB \
+docker run -it --rm --runtime=nvidia --gpus '"device=0"' --shm-size=8GB \
   -v ~/voicechat-zh/zh-checkpoint:/checkpoint \
   -v ~/voicechat-zh/model-repo:/data/models \
+  -v ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:ro \
+  -v ~/voicechat-zh/s2s/scripts/convert_nemotronllm_checkpoint.py:/s2s/scripts/convert_nemotronllm_checkpoint.py:ro \
+  -v ~/voicechat-zh/s2s/scripts/convert_eartts_checkpoint.py:/s2s/scripts/convert_eartts_checkpoint.py:ro \
+  -v ~/voicechat-zh/nano9b:/nano9b:ro \
+  -e NEMO_LLM_LOCAL_DIR=/nano9b \
   -e NEMO_CHECKPOINT_PATH=/checkpoint \
   --entrypoint /s2s/deploy_s2s_model.sh \
   nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest
 ```
 
-Pass: `Triton model repository generation completed successfully!`
-This step fully instantiates `NemotronVoiceChat` from the patched config inside
-the container, so a successful conversion is itself the structural
-compatibility check. Failure here → compare encoder config keys and re-run G2
-with a field mapping.
+Pass: `NEMO_LLM_LOCAL_DIR set - …` log lines appear at the tokenizer step and
+both conversions, and the run ends with
+`Triton model repository generation completed successfully!`. This step fully
+instantiates `NemotronVoiceChat` from the patched config inside the container,
+so a successful conversion is itself the structural compatibility check.
+Failure here → compare encoder config keys and re-run G2 with a field mapping.
 
-### G3 on an air-gapped host (offline tokenizer/config bundle)
+Notes:
 
-Everything in G3 is local except three spots that load the LLM's
-config/tokenizer from `nvidia/NVIDIA-Nemotron-Nano-9B-v2`: deploy tokenizer
-bundling in `checkpoint_utils/import_utils.py`, `AutoConfig`/`AutoTokenizer`
-in `/s2s/scripts/convert_nemotronllm_checkpoint.py`, and DuplexEARTTS's
-`AutoTokenizer` from `cfg.model.pretrained_lm_name` (via
-`/s2s/scripts/convert_eartts_checkpoint.py`).
-
-**Recommended: patched files + a plain LLM files dir.** This repo carries
-patched copies of all three files at their in-image paths
-(`s2s/scripts/convert_nemotronllm_checkpoint.py`,
-`s2s/scripts/convert_eartts_checkpoint.py`, and
-`opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py`).
-When `NEMO_LLM_LOCAL_DIR` points at a plain directory holding the LLM's
-`config.json` + tokenizer files (a modelscope or HF snapshot copy works
-as-is — no hub-cache layout involved), both steps load from it; when unset,
-behavior is identical to the image originals. No HF cache, no env juggling,
-no image changes.
-
-Stage the LLM files once (server):
-
-```bash
-mkdir -p ~/voicechat-zh/nano9b
-cp -a /root/.cache/modelscope/models/nv-community--NVIDIA-Nemotron-Nano-9B-v2/snapshots/master/. \
-      ~/voicechat-zh/nano9b/
-chmod -R a+rX ~/voicechat-zh/nano9b
-# sanity: must match the G3 log ("Saved embeddings (vocab_size=131072, hidden_size=4480)")
-grep -E '"(vocab_size|hidden_size)"' ~/voicechat-zh/nano9b/config.json
-```
-
-Sync the patched files from the repo (same as the scripts/ sync) and add
-these flags to the G3 `docker run`:
-
-```bash
-  -v ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:ro \
-  -v ~/voicechat-zh/s2s/scripts/convert_nemotronllm_checkpoint.py:/s2s/scripts/convert_nemotronllm_checkpoint.py:ro \
-  -v ~/voicechat-zh/s2s/scripts/convert_eartts_checkpoint.py:/s2s/scripts/convert_eartts_checkpoint.py:ro \
-  -v ~/voicechat-zh/nano9b:/nano9b:ro \
-  -e NEMO_LLM_LOCAL_DIR=/nano9b
-```
-
-Watch for `NEMO_LLM_LOCAL_DIR set - …` log lines in both the deploy
-tokenizer step and the nano-v2-vllm conversion.
-
-**Alternative (no patched files): pre-seeded HF hub cache.** Seed a real hub
-cache on a networked machine (`hf download … --exclude "*.safetensors"`, tar
-only the `models--*` dir) or map a modelscope snapshot into the layout
-(cache dir named after the HF repo id; `refs/main` = snapshot dir name via
-`printf`, no trailing newline; real files in `snapshots/<name>/`). Mount it
-with `-v ~/voicechat-zh/hf-cache/hub:/hf-hub -e HF_HUB_CACHE=/hf-hub
--e HF_HOME=/tmp/hf-home -e TRANSFORMERS_OFFLINE=1` — never point `HF_HOME`
-at the read-only mount (the token path is `$HF_HOME/token`; a
-`PermissionError` there means a stray unreadable token file or an
-unsearchable mount root). Verify as the container user with
-`sudo -u '#1000' cat …/refs/main`.
-
-If `AutoConfig(trust_remote_code=True)` later asks for remote code, copy the
-repo's `*.py` files into the staged dir and rerun. G3 is idempotent —
-steps already written to the model repo are skipped on rerun. Serving (G4)
-needs none of this: the runtime rebinds the tokenizer to the bundled
-`model-repo/.../tokenizer/` at load time (`load_utils.py`), so the serving
-container stays fully offline.
+- G3 is idempotent — steps already written to the model repo are skipped on
+  rerun.
+- The patched files are modified copies of the image's originals. When bumping
+  the NIM image tag, re-diff them against the new image and re-apply the
+  `NEMO_LLM_LOCAL_DIR` hunks if upstream changed.
+- If `AutoConfig(trust_remote_code=True)` asks for remote code, copy the
+  repo's `*.py` files into `nano9b/` and rerun.
+- G4 serving mounts **only the model repo** and needs none of this: the
+  runtime rebinds the tokenizer to the bundled `model-repo/.../tokenizer/`
+  at load time (`load_utils.py`), so the serving container stays fully
+  offline.
 
 ## G4 — serve & test (official flow, no code mounts)
 
@@ -307,6 +299,16 @@ class supports cfg / encoder / preprocessor access, but full streaming
 transcription may not work on the older nemo. G0's hard assertions
 (d_model=1024, causal att_context_size) and the G1 report are unaffected;
 transcription comes back at G4 with the full runtime.
+
+**G3 fails loading the LLM tokenizer (`Network is unreachable`,
+`PermissionError at …/token`, or `TypeError: PosixPath / NoneType`)** — one of
+the three patched deploy files isn't mounted, or `-e NEMO_LLM_LOCAL_DIR` is
+missing, so the stock image code tried the HF hub. Check the G3 command has
+all three `-v …import_utils.py / …convert_nemotronllm_checkpoint.py /
+…convert_eartts_checkpoint.py` mounts plus `NEMO_LLM_LOCAL_DIR`, and that
+`~/voicechat-zh/nano9b/config.json` exists (`vocab_size=131072,
+hidden_size=4480`). You should see `NEMO_LLM_LOCAL_DIR set - …` in the logs
+before the failing step.
 
 ## Rollback
 

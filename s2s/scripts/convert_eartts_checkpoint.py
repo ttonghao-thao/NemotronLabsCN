@@ -61,6 +61,16 @@ def convert(outdir, config, model_path):
         if _pretrained_tokenizer_name is not None:
             del cfg.model.tts_config.cas_config.pretrained_tokenizer_name
 
+    # zh-phase1 air-gapped support: DuplexEARTTS instantiates an AutoTokenizer
+    # from cfg.model.pretrained_lm_name (HF repo id, trust_remote_code=True);
+    # point it at the local LLM files dir when provided. Mirrors the
+    # NEMO_LLM_LOCAL_DIR override in convert_nemotronllm_checkpoint.py and
+    # checkpoint_utils/import_utils.py.
+    local_llm_dir = os.environ.get("NEMO_LLM_LOCAL_DIR", "")
+    if local_llm_dir and os.path.isfile(os.path.join(local_llm_dir, "config.json")):
+        print(f"NEMO_LLM_LOCAL_DIR set - DuplexEARTTS tokenizer from {local_llm_dir}")
+        cfg.model.pretrained_lm_name = local_llm_dir
+
     model = DuplexEARTTS(OmegaConf.to_container(cfg, resolve=True)).eval()
     # get subword encoder vocabs and config
     subword_id_to_char_ids = model.tts_model.embed_subword.subword_id_to_char_ids

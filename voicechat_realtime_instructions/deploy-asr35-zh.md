@@ -160,14 +160,17 @@ with a field mapping.
 
 ### G3 on an air-gapped host (offline tokenizer/config bundle)
 
-Everything in G3 is local except two `from_pretrained` calls against
-`nvidia/NVIDIA-Nemotron-Nano-9B-v2` (deploy tokenizer bundling in
-`checkpoint_utils/import_utils.py`, and `AutoConfig`/`AutoTokenizer` in
-`/s2s/scripts/convert_nemotronllm_checkpoint.py`).
+Everything in G3 is local except three spots that load the LLM's
+config/tokenizer from `nvidia/NVIDIA-Nemotron-Nano-9B-v2`: deploy tokenizer
+bundling in `checkpoint_utils/import_utils.py`, `AutoConfig`/`AutoTokenizer`
+in `/s2s/scripts/convert_nemotronllm_checkpoint.py`, and DuplexEARTTS's
+`AutoTokenizer` from `cfg.model.pretrained_lm_name` (via
+`/s2s/scripts/convert_eartts_checkpoint.py`).
 
 **Recommended: patched files + a plain LLM files dir.** This repo carries
-patched copies of both files at their in-image paths
-(`s2s/scripts/convert_nemotronllm_checkpoint.py` and
+patched copies of all three files at their in-image paths
+(`s2s/scripts/convert_nemotronllm_checkpoint.py`,
+`s2s/scripts/convert_eartts_checkpoint.py`, and
 `opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py`).
 When `NEMO_LLM_LOCAL_DIR` points at a plain directory holding the LLM's
 `config.json` + tokenizer files (a modelscope or HF snapshot copy works
@@ -192,6 +195,7 @@ these flags to the G3 `docker run`:
 ```bash
   -v ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:ro \
   -v ~/voicechat-zh/s2s/scripts/convert_nemotronllm_checkpoint.py:/s2s/scripts/convert_nemotronllm_checkpoint.py:ro \
+  -v ~/voicechat-zh/s2s/scripts/convert_eartts_checkpoint.py:/s2s/scripts/convert_eartts_checkpoint.py:ro \
   -v ~/voicechat-zh/nano9b:/nano9b:ro \
   -e NEMO_LLM_LOCAL_DIR=/nano9b
 ```

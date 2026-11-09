@@ -176,6 +176,21 @@ tar -C ~/.cache/huggingface/hub -cf nano9b-hub-cache.tar \
     models--nvidia--NVIDIA-Nemotron-Nano-9B-v2
 ```
 
+If only ModelScope is reachable (e.g. CN network), download the mirror and
+map its snapshot into the HF cache layout yourself — the cache dir must be
+named after the HF repo id (`nvidia/...`, from config's `pretrained_llm`),
+while the snapshot dir name is free as long as `refs/main` matches it:
+
+```bash
+modelscope download nv-community/NVIDIA-Nemotron-Nano-9B-v2 --exclude "*.safetensors"
+# → /root/.cache/modelscope/models/nv-community--NVIDIA-Nemotron-Nano-9B-v2/snapshots/master
+cp -a /root/.cache/modelscope/models/nv-community--NVIDIA-Nemotron-Nano-9B-v2/snapshots/master/. \
+      ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/snapshots/<name>/
+printf '<name>' > ~/voicechat-zh/hf-cache/hub/models--nvidia--NVIDIA-Nemotron-Nano-9B-v2/refs/main
+# sanity: vocab_size=131072, hidden_size=4480 in the mirror's config.json
+# must match the G3 log ("Saved embeddings (vocab_size=..., hidden_size=...)")
+```
+
 A **hand-built** cache (e.g. from a `--local-dir` copy) works too, but must
 be a real hub cache layout — `refs/main` is mandatory (hub reads it to locate
 the snapshot; without it offline resolution fails even with every file

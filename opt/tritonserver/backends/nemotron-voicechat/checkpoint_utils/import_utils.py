@@ -370,6 +370,19 @@ def generate_tts_model_init_inputs(
         full_cfg.model.speech_generation.model.pretrained_model = None
         full_cfg.model.stt.model.pretrained_asr = None
         full_cfg.model.stt.model.pretrained_weights = False
+        # zh-phase1 air-gapped support: NemotronVoiceChat -> DuplexSTTModel /
+        # DuplexEARTTS load the LLM through cfg.model.stt.model.pretrained_llm
+        # and cfg.model.speech_generation.model.pretrained_lm_name; point both
+        # at the local files dir. NOTE: downstream code does substring checks
+        # ('Nemotron' in pretrained_llm) — the NEMO_LLM_LOCAL_DIR path must
+        # keep "Nemotron" in it (see deploy-asr35-zh.md G3).
+        local_llm_dir = os.environ.get("NEMO_LLM_LOCAL_DIR", "")
+        if local_llm_dir and os.path.isfile(os.path.join(local_llm_dir, "config.json")):
+            logger.info(
+                f"NEMO_LLM_LOCAL_DIR set - building NemotronVoiceChat with LLM files from {local_llm_dir}"
+            )
+            full_cfg.model.stt.model.pretrained_llm = local_llm_dir
+            full_cfg.model.speech_generation.model.pretrained_lm_name = local_llm_dir
 
     cfg_dict = OmegaConf.to_container(full_cfg, resolve=True)
     logger.info("Loading NemotronVoiceChat from combined checkpoint...")

@@ -173,7 +173,8 @@ instead when `NEMO_LLM_LOCAL_DIR` is set (unset, they behave identically to
 the image originals):
 
 - `opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py`
-  — deploy tokenizer bundling
+  — deploy tokenizer bundling **and** the `NemotronVoiceChat` build in the
+  TTS-init-inputs step (rewrites `pretrained_llm` / `pretrained_lm_name`)
 - `s2s/scripts/convert_nemotronllm_checkpoint.py` — `AutoConfig` /
   `AutoTokenizer` for the nano-v2-vllm conversion
 - `s2s/scripts/convert_eartts_checkpoint.py` — `DuplexEARTTS`'s
@@ -186,12 +187,18 @@ docker run -it --rm --runtime=nvidia --gpus '"device=0"' --shm-size=8GB \
   -v ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py:ro \
   -v ~/voicechat-zh/s2s/scripts/convert_nemotronllm_checkpoint.py:/s2s/scripts/convert_nemotronllm_checkpoint.py:ro \
   -v ~/voicechat-zh/s2s/scripts/convert_eartts_checkpoint.py:/s2s/scripts/convert_eartts_checkpoint.py:ro \
-  -v ~/voicechat-zh/nano9b:/nano9b:ro \
-  -e NEMO_LLM_LOCAL_DIR=/nano9b \
+  -v ~/voicechat-zh/nano9b:/llm/Nemotron-Nano-9B-v2:ro \
+  -e NEMO_LLM_LOCAL_DIR=/llm/Nemotron-Nano-9B-v2 \
   -e NEMO_CHECKPOINT_PATH=/checkpoint \
   --entrypoint /s2s/deploy_s2s_model.sh \
   nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest
 ```
+
+The `nano9b` host dir is mounted at a path containing `Nemotron` **on
+purpose**: `DuplexSTTModel` branches on `'Nemotron' in cfg.pretrained_llm` in
+several places, and the patch points that field at `NEMO_LLM_LOCAL_DIR` — a
+path without the substring would silently skip the Nemotron-specific model
+handling.
 
 Pass: `NEMO_LLM_LOCAL_DIR set - …` log lines appear at the tokenizer step and
 both conversions, and the run ends with

@@ -244,13 +244,34 @@ Readiness poll:
 curl 'http://localhost:9000/v1/realtime/health'
 ```
 
-Client test (from [deploy.md](deploy.md)):
+Client test — run **in a second container** (the image already ships the
+client and all its deps: websockets / soundfile / numpy; nothing is installed
+on the host). `--network=host` reaches the server's published port via
+localhost, audio goes in and results come out through mounts:
 
 ```bash
-docker cp nemotron-labs-voicechat-zh:/s2s/nemotron-voicechat-client.py .
-pip install websockets soundfile numpy
-python nemotron-voicechat-client.py --input-file ~/voicechat-zh/audio/zh_1.wav --no-playback
+# terminal 2 (while the server container from above is running)
+mkdir -p ~/voicechat-zh/client-out
+docker run -it --rm --network=host \
+  -v ~/voicechat-zh/audio:/audio:ro \
+  -v ~/voicechat-zh/client-out:/out -w /out \
+  --entrypoint bash \
+  nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest -c \
+  "python /s2s/nemotron-voicechat-client.py --server ws://localhost:9000 \
+     --input-file /audio/zh_1.wav --no-playback"
 ```
+
+Results persist on the host:
+
+```bash
+cat ~/voicechat-zh/client-out/agent_text.txt   # the LLM's reply — the acceptance signal
+cat ~/voicechat-zh/client-out/user_text.txt    # RNNT side-channel ASR (garbage on ZH is expected, phase-1 caveat)
+```
+
+Notes: if the ws handshake fails, try `--server wss://localhost:9000`
+(depending on how the server terminates TLS). File input streams the clip
+plus ~20 s of trailing silence, so a run takes clip-length + ~20 s. For a
+regression clip, rerun with the EN wav.
 
 Fixed test set: `你好，你是谁？` / `请简单介绍一下北京。` / `帮我查一下产品知识。`
 plus an English regression clip (e.g. the EN wav used in G1).

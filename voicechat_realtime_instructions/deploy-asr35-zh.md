@@ -384,6 +384,36 @@ expected to be garbage on Chinese — the old English RNNT consumes the new
 encoder's raw output. Turn-taking (barge-in/EOU) may misfire on Chinese; treat
 oddities there as phase-2 work (RNNT replacement), not encoder failure.
 
+## Phase-1 OUTCOME (final): scenario C — zero-shot is not viable
+
+The empirical verdict, from the G4 differential test plus the G1 latent
+report:
+
+- **G1 latent report**: EN mean cosine **0.083**, ZH **0.0027** (thresholds:
+  >0.9 zero-shot likely, <0.7 expect B/C) — the encoders' latent spaces are
+  effectively orthogonal, and the new encoder's output magnitude is ~1/3 of
+  the old one's (`new_mean_abs` ≈ 0.015 vs `old_mean_abs` ≈ 0.04). Not
+  drift — disjoint representation spaces.
+- **G4 differential**: the EN stock checkpoint greets/transcribes/responds
+  normally under the identical serving config; the ZH checkpoint streams
+  pure silence with zero text events — it never even produces the proactive
+  greeting, which depends only on the LLM path
+  (`proj(adapter(new_encoder))`) reading *silence* frames, not on the RNNT.
+
+Conclusion: swapping only the perception encoder is insufficient — the
+frozen downstream (modality_adapter → proj → LLM, and the RNNT side channel)
+cannot read the ASR 3.5 encoder's representations at all, in any language.
+Phase-1's deliverables are the diagnostic chain (G0–G4 incl. the
+differential methodology), the offline G3 / dual-GPU serving infrastructure,
+and this quantitative evidence.
+
+Phase-2 (per the scenario-C row): fine-tune `modality_adapter` +
+`projection` with encoder/LLM/TTS frozen, starting from the ZH checkpoint,
+on mixed ZH/EN speech with paired responses — the training entry points are
+this repo's `examples/speechlm2/` scripts (`s2s_duplex_train.py`,
+`salm_train.py`). Side task: replace the RNNT side channel with ASR 3.5's
+own decoder/joint + tokenizer (the 15 tensors G2 skips).
+
 ## Troubleshooting
 
 **G0/G2 restore dies with `No module named

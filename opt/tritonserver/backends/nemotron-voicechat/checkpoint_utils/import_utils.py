@@ -504,6 +504,12 @@ def create_triton_model_config(
     instance_group = config.instance_group.add()
     instance_group.count = 1
     instance_group.kind = model_config.ModelInstanceGroup.KIND_GPU
+    # Pin to GPU 0. Without `gpus`, Triton creates `count` instances PER
+    # visible GPU for KIND_GPU models — on a 2-GPU box that means two full
+    # model copies (stub + LLM + TTS engines each) and a guaranteed OOM.
+    # Exactly one instance also matches the deployment design (single
+    # sequence manager; see deploy-asr35-zh.md G4 dual-GPU notes).
+    instance_group.gpus.extend([0])
 
     # Add sequence batching
     sequence_batching = config.sequence_batching

@@ -6,8 +6,9 @@ keeping everything else (modality adapter, projection, old RNNT, Nano 9B, EAR-TT
 function head) unchanged.
 
 **The official deployment flow is used unchanged** — the only difference is *which
-checkpoint directory* is mounted. All custom code (the G0–G2 scripts and three
-patched deploy files for offline G3) runs inside the NIM inference container via
+checkpoint directory* is mounted. All custom code (the G0–G2 scripts, three
+patched deploy files for offline G3, and a patched `load_utils.py` for
+dual-GPU serving) runs inside the NIM inference container via
 mounts; the image itself is never modified, so the nemo package used for every
 check is exactly the one the runtime uses. The whole flow G0→G4 runs fully
 offline (no HF access at any step).
@@ -283,6 +284,73 @@ cat ~/voicechat-zh/client-out/user_text.txt    # RNNT side-channel ASR (garbage 
 If the ws handshake fails, retry with `--server wss://localhost:9000`
 (depends on how the server terminates TLS). File input streams the clip plus
 ~20 s of trailing silence, so each run takes clip-length + ~20 s.
+
+### G4 dual-GPU variant (LLM on GPU 0, TTS on GPU 1)
+
+On a 2-GPU box, replace the Step-1 server command with the one at the end of
+this subsection. Two changes make it work, plus three env vars.
+
+**Change 1 — patch `load_utils.py` (this repo:
+`opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/load_utils.py`).
+The TTS vLLM engine is created after the LLM engine; vLLM `EngineCore`
+subprocesses inherit the environment at creation time, so the patch
+temporarily swaps `CUDA_VISIBLE_DEVICES` to `TTS_CUDA_VISIBLE_DEVICES`
+around `load_tts_model_in_vllm(...)` and restores it right after (the rest
+of the Triton stub keeps seeing both GPUs). Unset, behavior is stock.
+Mount it over the image copy:
+
+```bash
+cp /tmp/repo/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/load_utils.py \
+   ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/
+```
+
+**Change 2 — pin the Triton instance to GPU 0** (`gpus: [ 0 ]` in
+`config.pbtxt`'s `instance_group`). This is the root cause of
+duplicate-instance OOMs: for a `KIND_GPU` model without `gpus`, Triton
+creates `count` instances **per visible GPU** — two GPUs × count 1 = two
+full model copies (stub ≈3.2 G + LLM + TTS each), guaranteed OOM. With this
+repo's patched `import_utils.py`, G3 generates the field automatically; for
+a model repo generated before the patch, hand-edit
+`model-repo/nemotron-voicechat/config.pbtxt`:
+
+```
+instance_group [ { count: 1  kind: KIND_GPU  gpus: [ 0 ] } ]
+```
+
+**Env vars** (verified values; memory layout: GPU 0 ≈ 350 M main + 3.3 G
+stub + ~31 G LLM engine, GPU 1 ≈ 350 M main + 3.8 G TTS engine):
+
+| Variable | Value | Notes |
+|---|---|---|
+| `TTS_CUDA_VISIBLE_DEVICES` | `1` | activates the load_utils patch; TTS lands on physical GPU 1 |
+| `LLM_GPU_MEM_UTIL` | `0.65` | stock default 0.45. 0.85 failed vLLM startup precheck with both stubs resident (37.49 G free < 37.84 G needed); raise only while watching nvidia-smi |
+| `TTS_GPU_MEM_UTIL` | `0.4` | stock default; it's a cap, not a reservation (measured ≈3.8 G) |
+
+**Server command** (dual-GPU; note `-d`, `--gpus all`, and that
+`DEFAULT_INSTRUCTIONS` is still required for the Chinese test):
+
+```bash
+docker run -d --name nemotron-labs-voicechat-zh \
+  --runtime=nvidia --gpus all --shm-size=8GB \
+  -e NIM_HTTP_API_PORT=9000 \
+  -p 9000:9000 \
+  -e DEFAULT_INSTRUCTIONS="你是一名语音助手。始终用用户所说的语言回答:用户说中文就用中文,说英文就用英文。口语化、对话式、简洁自然,先向用户问好。" \
+  -e TTS_CUDA_VISIBLE_DEVICES=1 \
+  -e LLM_GPU_MEM_UTIL=0.65 \
+  -e TTS_GPU_MEM_UTIL=0.4 \
+  -v ~/voicechat-zh/model-repo:/data/models \
+  -v ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/load_utils.py:/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/load_utils.py \
+  nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest
+```
+
+Ops notes: `-d` not `-it` (a closed terminal SIGHUPs the container). Both
+GPUs must be visible (`--gpus all`, or `--gpus '"device=0,1"'`). Before a
+restart, check `nvidia-smi` for orphaned `VLLM::EngineCore` processes
+holding memory and kill them first. Startup is slow (Triton health-wait up
+to 1200 s + warmup client); `[TRITON]`-prefixed lines in `docker logs -f`
+come from `run_s2s_server.sh`'s sed and are normal. `load_utils`'s logger
+has no INFO handler in the backend path — verify engine placement with
+`nvidia-smi`, not logs. One instance per box.
 
 Fixed test set: `你好，你是谁？` / `请简单介绍一下北京。` / `帮我查一下产品知识。`
 plus an English regression clip (e.g. the EN wav used in G1).

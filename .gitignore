@@ -182,3 +182,13 @@ examples/neural_graphs/*.yml
 nemo_experiments/
 
 slurm*.out
+
+# Local container dumps (zh-phase1): only the nemotron-voicechat Triton backend
+# sources under opt/ are tracked; everything below is reproducible from the image.
+/opt_4wWpy.tar
+/s2s_sJ5bB.tar
+/opt/hpcx/
+/opt/nvidia/
+/opt/mellanox/
+/opt/amazon/
+/opt/nim/

@@ -238,6 +238,21 @@ docker run -it --rm --name=nemotron-labs-voicechat-zh \
 Note: the serving container mounts **only the model repo** — no code mounts,
 no image changes.
 
+**System prompt: override the built-in English default.** The G4 client
+sends no `instructions`, so the server falls back to its built-in prompt —
+and the tool-calling variant explicitly says "have engaging conversations
+in English" (`audio_server.py` `DEFAULT_INSTRUCTIONS_FC`), which biases
+Chinese input toward English replies and pollutes the acceptance test.
+Set the designed env knob on the serving container instead (client
+instructions > `DEFAULT_INSTRUCTIONS` > built-in defaults):
+
+```bash
+  -e DEFAULT_INSTRUCTIONS="你是一名语音助手。始终用用户所说的语言回答:用户说中文就用中文,说英文就用英文。口语化、对话式、简洁自然,先向用户问好。"
+```
+
+(`prompt_template.jinja` itself needs no change — it is language-neutral
+rendering plumbing for the system message and tool definitions.)
+
 Readiness poll:
 
 ```bash

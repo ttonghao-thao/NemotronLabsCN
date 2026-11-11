@@ -417,6 +417,19 @@ all three `-v …import_utils.py / …convert_nemotronllm_checkpoint.py /
 hidden_size=4480`). You should see `NEMO_LLM_LOCAL_DIR set - …` in the logs
 before the failing step.
 
+**Triton exits with `failed to load all models` right after the model loads
+fine (log shows `Poll failed for model directory 'opt': Invalid model
+name ...`)** — a stray directory inside the model repo. Triton polls every
+subdirectory of the model repository path as a model, so the repo top level
+must contain **only** `nemotron-voicechat/`. A common way this happens:
+copying the patched `opt/` tree into the model-repo dir by mistake (the
+mount source belongs outside it). Remove the stray dir and restart:
+
+```bash
+ls <model-repo>/            # must show only nemotron-voicechat/
+mv <model-repo>/opt /tmp/stray-opt
+```
+
 ## Rollback
 
 Serve the English stack again at any time by pointing the serving container at a

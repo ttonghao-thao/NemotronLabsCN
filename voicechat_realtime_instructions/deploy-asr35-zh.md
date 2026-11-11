@@ -223,6 +223,20 @@ Notes:
 
 ## G4 — serve & test (official flow, no code mounts)
 
+G4 runs entirely on the server, in three steps: start the serving container
+(terminal 1) → wait for readiness → run the test client in a second
+container (terminal 2). The serving container mounts **only the model repo**
+— no code mounts, no image changes.
+
+**Step 1 — start the server** (terminal 1). `DEFAULT_INSTRUCTIONS` is part
+of this command, not an optional extra: the test client sends no
+instructions of its own, and the server's built-in tool-calling default
+explicitly mandates "conversations in English"
+(`audio_server.py:DEFAULT_INSTRUCTIONS_FC`), which would bias Chinese input
+toward English replies and pollute the acceptance result. Resolution order:
+client instructions > `DEFAULT_INSTRUCTIONS` > built-in defaults.
+(`prompt_template.jinja` needs no change — language-neutral plumbing.)
+
 ```bash
 docker run -it --rm --name=nemotron-labs-voicechat-zh \
   --runtime=nvidia \
@@ -230,42 +244,25 @@ docker run -it --rm --name=nemotron-labs-voicechat-zh \
   --shm-size=8GB \
   -e NIM_HTTP_API_PORT=9000 \
   -p 9000:9000 \
+  -e DEFAULT_INSTRUCTIONS="你是一名语音助手。始终用用户所说的语言回答:用户说中文就用中文,说英文就用英文。口语化、对话式、简洁自然,先向用户问好。" \
   -v ~/voicechat-zh/model-repo:/data/models \
   --entrypoint /s2s/run_s2s_server.sh \
   nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest
 ```
 
-Note: the serving container mounts **only the model repo** — no code mounts,
-no image changes.
-
-**System prompt: override the built-in English default.** The G4 client
-sends no `instructions`, so the server falls back to its built-in prompt —
-and the tool-calling variant explicitly says "have engaging conversations
-in English" (`audio_server.py` `DEFAULT_INSTRUCTIONS_FC`), which biases
-Chinese input toward English replies and pollutes the acceptance test.
-Set the designed env knob on the serving container instead (client
-instructions > `DEFAULT_INSTRUCTIONS` > built-in defaults):
-
-```bash
-  -e DEFAULT_INSTRUCTIONS="你是一名语音助手。始终用用户所说的语言回答:用户说中文就用中文,说英文就用英文。口语化、对话式、简洁自然,先向用户问好。"
-```
-
-(`prompt_template.jinja` itself needs no change — it is language-neutral
-rendering plumbing for the system message and tool definitions.)
-
-Readiness poll:
+**Step 2 — wait for readiness** (terminal 2):
 
 ```bash
 curl 'http://localhost:9000/v1/realtime/health'
 ```
 
-Client test — run **in a second container** (the image already ships the
-client and all its deps: websockets / soundfile / numpy; nothing is installed
-on the host). `--network=host` reaches the server's published port via
-localhost, audio goes in and results come out through mounts:
+**Step 3 — run the test client in a second container** (terminal 2). The
+image already ships the client and all its deps (websockets / soundfile /
+numpy); nothing is installed on the host. `--network=host` reaches the
+server's published port via localhost; audio goes in and results come out
+through mounts:
 
 ```bash
-# terminal 2 (while the server container from above is running)
 mkdir -p ~/voicechat-zh/client-out
 docker run -it --rm --network=host \
   -v ~/voicechat-zh/audio:/audio:ro \
@@ -276,17 +273,16 @@ docker run -it --rm --network=host \
      --input-file /audio/zh_1.wav --no-playback"
 ```
 
-Results persist on the host:
+Repeat for each test clip. Results land on the host after each run:
 
 ```bash
 cat ~/voicechat-zh/client-out/agent_text.txt   # the LLM's reply — the acceptance signal
 cat ~/voicechat-zh/client-out/user_text.txt    # RNNT side-channel ASR (garbage on ZH is expected, phase-1 caveat)
 ```
 
-Notes: if the ws handshake fails, try `--server wss://localhost:9000`
-(depending on how the server terminates TLS). File input streams the clip
-plus ~20 s of trailing silence, so a run takes clip-length + ~20 s. For a
-regression clip, rerun with the EN wav.
+If the ws handshake fails, retry with `--server wss://localhost:9000`
+(depends on how the server terminates TLS). File input streams the clip plus
+~20 s of trailing silence, so each run takes clip-length + ~20 s.
 
 Fixed test set: `你好，你是谁？` / `请简单介绍一下北京。` / `帮我查一下产品知识。`
 plus an English regression clip (e.g. the EN wav used in G1).

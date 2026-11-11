@@ -52,7 +52,10 @@ git clone -b nemotron-labs-voicechat https://github.com/ttonghao-thao/NemotronLa
 cp /tmp/repo/examples/speechlm2/verify_asr35_encoder_compatibility.py \
    /tmp/repo/examples/speechlm2/replace_voicechat_perception_encoder.py \
    ~/voicechat-zh/scripts/
-# patched deploy files for offline G3 (mounted over the image copies, see G3)
+# patched deploy files for offline G3 (mounted over the image copies, see G3).
+# These live as SIBLINGS of model-repo/ — never copy anything into model-repo/
+# itself: Triton polls every subdirectory of the repo path as a model, and a
+# stray dir there aborts serving startup with "failed to load all models".
 cp -a /tmp/repo/s2s ~/voicechat-zh/
 mkdir -p ~/voicechat-zh/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils
 cp /tmp/repo/opt/tritonserver/backends/nemotron-voicechat/checkpoint_utils/import_utils.py \
@@ -212,6 +215,11 @@ Notes:
 
 - G3 is idempotent — steps already written to the model repo are skipped on
   rerun.
+- The model repo's top level must contain **only** `nemotron-voicechat/`
+  (that is all G3 creates). Triton polls every subdirectory of the repo path
+  as a model — a stray directory copied in there (an `opt/` tree is the
+  classic accident) fails model validation and aborts serving startup with
+  `failed to load all models`. G4 Step 1 checks this before starting.
 - The patched files are modified copies of the image's originals. When bumping
   the NIM image tag, re-diff them against the new image and re-apply the
   `NEMO_LLM_LOCAL_DIR` hunks if upstream changed.
@@ -229,7 +237,17 @@ G4 runs entirely on the server, in three steps: start the serving container
 container (terminal 2). The serving container mounts **only the model repo**
 — no code mounts, no image changes.
 
-**Step 1 — start the server** (terminal 1). `DEFAULT_INSTRUCTIONS` is part
+**Step 1 — start the server** (terminal 1). Pre-flight check first: the
+model repo's top level must show **only** `nemotron-voicechat/` — Triton
+polls every subdirectory of the repo path as a model, and a stray directory
+(e.g. an `opt/` tree copied in by mistake) aborts startup with
+`failed to load all models` even though the model itself loaded fine:
+
+```bash
+ls ~/voicechat-zh/model-repo/   # must show only: nemotron-voicechat
+```
+
+Then start the container. `DEFAULT_INSTRUCTIONS` is part
 of this command, not an optional extra: the test client sends no
 instructions of its own, and the server's built-in tool-calling default
 explicitly mandates "conversations in English"
@@ -416,19 +434,6 @@ all three `-v …import_utils.py / …convert_nemotronllm_checkpoint.py /
 `~/voicechat-zh/nano9b/config.json` exists (`vocab_size=131072,
 hidden_size=4480`). You should see `NEMO_LLM_LOCAL_DIR set - …` in the logs
 before the failing step.
-
-**Triton exits with `failed to load all models` right after the model loads
-fine (log shows `Poll failed for model directory 'opt': Invalid model
-name ...`)** — a stray directory inside the model repo. Triton polls every
-subdirectory of the model repository path as a model, so the repo top level
-must contain **only** `nemotron-voicechat/`. A common way this happens:
-copying the patched `opt/` tree into the model-repo dir by mistake (the
-mount source belongs outside it). Remove the stray dir and restart:
-
-```bash
-ls <model-repo>/            # must show only nemotron-voicechat/
-mv <model-repo>/opt /tmp/stray-opt
-```
 
 ## Rollback
 

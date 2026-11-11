@@ -192,3 +192,6 @@ slurm*.out
 /opt/mellanox/
 /opt/amazon/
 /opt/nim/
+/opt/tritonserver/bin/
+/opt/tritonserver/python/
+/opt/tritonserver/backends/python/

@@ -142,9 +142,12 @@ The latent report predicts the G4 outcome: EN mean cosine > 0.9 →
 zero-shot likely works; < 0.7 → expect adapter/projection tuning.
 
 **Reference values from this deployment (recorded):** key alignment
-`exact=638, shape_mismatch=0`; latent EN mean cosine **0.083**, ZH
-**0.0027**, `new_mean_abs` ≈ 0.015 vs `old_mean_abs` ≈ 0.04 — orthogonal
-representation spaces, which predicted (and Step 6 confirmed) scenario C.
+`exact=638, shape_mismatch=0`. The latent cosines this run printed
+(EN 0.083 / ZH 0.0027) are **invalid** — the script sliced the encoder's
+`[B,D,T]` output along the channel axis instead of the frame axis;
+[asr35-zh-next-steps.md](asr35-zh-next-steps.md) item 2 defines the
+corrected computation. Do not cite the cosine numbers; the verdict rests on
+the Step-6 differential alone.
 
 ## Step 3 — G2: solidify the ZH checkpoint
 
@@ -326,27 +329,34 @@ cleared the serving stack in phase 1.
 
 ### Recorded phase-1 verdict: scenario C — zero-shot is not viable
 
-- **G1**: EN mean cosine **0.083**, ZH **0.0027** — orthogonal latent
-  spaces (not drift), new encoder output magnitude ~1/3 of the old's.
-- **G4 differential**: EN stock checkpoint greets/transcribes/responds
-  under the identical config; the ZH checkpoint streams pure silence with
-  zero text events — not even the proactive greeting, which depends only
-  on the LLM path (`proj(adapter(new_encoder))`) reading *silence* frames
-  and not on the RNNT.
+The load-bearing evidence is the **G4 differential**: the EN stock
+checkpoint greets/transcribes/responds under the identical serving config,
+while the ZH checkpoint streams pure silence with zero text events — not
+even the proactive greeting, which depends only on the LLM path
+(`proj(adapter(new_encoder))`) reading *silence* frames, not on the RNNT.
 
-Conclusion: an encoder-only swap cannot work — the frozen downstream
-(modality_adapter → proj → LLM, plus the RNNT side channel that consumes
-the raw encoder output) cannot read ASR 3.5's representations in any
-language. Phase-1 deliverables: the diagnostic chain (G0–G4 + differential
-methodology), the offline G3 / dual-GPU serving infrastructure, and the
-quantitative evidence above.
+**G1 latent numbers: retracted.** The original script sliced the encoder's
+`[B,D,T]` output along the channel axis instead of frames, so the printed
+cosines (EN 0.083 / ZH 0.0027) are meaningless. The causal story
+("orthogonal representation spaces", "training is mandatory") is on hold
+until the corrected comparison and the frame-level EN/ZH trace in
+[asr35-zh-next-steps.md](asr35-zh-next-steps.md) /
+[asr35-g4-runbook-zh.md](asr35-g4-runbook-zh.md) say otherwise; the
+empirical verdict above stands on the differential alone.
 
-Phase-2 (scenario-C row): fine-tune `modality_adapter` + `projection`,
-everything else frozen, starting from the ZH checkpoint, on mixed ZH/EN
-speech with paired responses — entry points are this repo's
-`examples/speechlm2/` scripts (`s2s_duplex_train.py`, `salm_train.py`).
-Side task: replace the RNNT side channel with ASR 3.5's own decoder/joint
-+ tokenizer (the 15 tensors G2 skips).
+Conclusion: swapping only the perception encoder did not work at runtime —
+the frozen downstream could not act on the swapped encoder's output. Phase-1
+deliverables: the diagnostic chain (G0–G4 + differential methodology), the
+offline G3 / dual-GPU serving infrastructure, and the follow-up plan with
+corrected metrics.
+
+Phase-2 (scenario-C row, gated on the corrected diagnostics): fine-tune
+`modality_adapter` + `projection`, everything else frozen, starting from
+the ZH checkpoint, on mixed ZH/EN speech with paired responses — entry
+points are this repo's `examples/speechlm2/` scripts
+(`s2s_duplex_train.py`, `salm_train.py`). Side task: replace the RNNT side
+channel with ASR 3.5's own decoder/joint + tokenizer (the 15 tensors G2
+skips).
 
 Known caveats regardless of scenario: the RNNT side-channel transcript
 (`user_text.txt`) degrades with the new encoder (old EN RNNT reads the raw
